@@ -1,0 +1,23 @@
+.DS_Store
+__pycache__/
+*.pyc
+.claude/settings.local.json
+
+# environments
+.venv/
+
+# Part 1 model outputs (out/ and out_augmented/ checkpoints are ~400MB each)
+part1/out/
+part1/out_augmented/
+
+# Part 2 checkpoints and logs (the checkpoint goes to Google Drive, not git)
+part2/checkpoints/
+part2/wandb/
+*.pt
+*.bin
+*.safetensors
+*.log
+
+# run logs
+logs/
+part2/debug/
