@@ -38,10 +38,97 @@ def encode_sql(sql):
     return sql.replace('<', LT_PLACEHOLDER)
 
 
+# ---------------------------------------------------------------------------------------------
+# SQL-side tokenization. Two modes:
+#   't5'   (default, used for fine-tuning): the T5 SentencePiece tokenizer for the SQL too.
+#   'word' (extra credit, training from scratch): every whitespace-separated SQL word seen in
+#          train.sql gets its own new token id (32128, 32129, ...). This shrinks the average target
+#          from ~217 T5 tokens to ~61. Words never seen in training (e.g. a flight number that only
+#          appears in the question) fall back to ordinary T5 SentencePiece pieces, so any SQL can
+#          still be written. The English questions always use the normal T5 tokenizer.
+# ---------------------------------------------------------------------------------------------
+SQL_TOKENIZER = 't5'
+USE_PREFIX = True
+_WORD_VOCAB = None      # list of SQL words; word i has token id WORD_OFFSET + i
+_WORD_TO_ID = None
+WORD_OFFSET = 32128     # size of the original t5-small embedding table
+EOS_ID = 1
+
+
+def configure(sql_tokenizer='t5', use_prefix=True):
+    global SQL_TOKENIZER, USE_PREFIX
+    assert sql_tokenizer in ('t5', 'word')
+    SQL_TOKENIZER, USE_PREFIX = sql_tokenizer, use_prefix
+
+
+def get_word_vocab(data_folder='data'):
+    """Sorted list of all whitespace-separated words in the training SQL (built the same way every
+    run, so token ids are stable between training and a later --eval_only)."""
+    global _WORD_VOCAB, _WORD_TO_ID
+    if _WORD_VOCAB is None:
+        words = set()
+        for q in load_lines(os.path.join(data_folder, 'train.sql')):
+            words.update(q.split())
+        _WORD_VOCAB = sorted(words)
+        _WORD_TO_ID = {w: WORD_OFFSET + i for i, w in enumerate(_WORD_VOCAB)}
+    return _WORD_VOCAB
+
+
+def target_vocab_size():
+    """Embedding/output size the model needs for the current SQL tokenizer."""
+    if SQL_TOKENIZER == 'word':
+        return WORD_OFFSET + len(get_word_vocab())
+    return WORD_OFFSET
+
+
+def encode_targets(sql_lines, tokenizer):
+    """SQL strings -> list of token-id lists, each ending with </s>."""
+    if SQL_TOKENIZER == 't5':
+        return tokenizer([encode_sql(q) for q in sql_lines], max_length=MAX_TARGET_LEN,
+                         truncation=True)['input_ids']
+    get_word_vocab()
+    out = []
+    for q in sql_lines:
+        ids = []
+        for w in q.split():
+            if w in _WORD_TO_ID:
+                ids.append(_WORD_TO_ID[w])
+            else:  # unseen word: spell it with T5 pieces (each starts with the word-boundary mark)
+                ids.extend(tokenizer.encode(encode_sql(w), add_special_tokens=False))
+        out.append(ids[:MAX_TARGET_LEN - 1] + [EOS_ID])
+    return out
+
+
+def _decode_word_ids(ids, tokenizer):
+    parts, run = [], []
+
+    def flush():
+        if run:
+            parts.append(tokenizer.decode(run, skip_special_tokens=True,
+                                          clean_up_tokenization_spaces=False))
+            run.clear()
+
+    for t in ids:
+        t = int(t)
+        if t == EOS_ID:
+            break
+        if t >= WORD_OFFSET:
+            flush()
+            parts.append(_WORD_VOCAB[t - WORD_OFFSET])
+        else:
+            run.append(t)   # pad/start (0) and other special ids are dropped by decode()
+    flush()
+    return ' '.join(' '.join(parts).split()).replace(LT_PLACEHOLDER, '<')
+
+
 def decode_sql(token_ids_batch):
     """Turn generated token ids back into SQL strings (inverse of the target preprocessing)."""
-    texts = get_tokenizer().batch_decode(token_ids_batch, skip_special_tokens=True,
-                                         clean_up_tokenization_spaces=False)
+    tokenizer = get_tokenizer()
+    if SQL_TOKENIZER == 'word':
+        get_word_vocab()
+        return [_decode_word_ids(ids, tokenizer) for ids in token_ids_batch]
+    texts = tokenizer.batch_decode(token_ids_batch, skip_special_tokens=True,
+                                   clean_up_tokenization_spaces=False)
     return [t.replace(LT_PLACEHOLDER, '<').strip() for t in texts]
 
 
@@ -67,7 +154,7 @@ class T5Dataset(Dataset):
 
     def process_data(self, data_folder, split, tokenizer):
         nl_lines = load_lines(os.path.join(data_folder, f'{split}.nl'))
-        sources = [TASK_PREFIX + line for line in nl_lines]
+        sources = [(TASK_PREFIX if USE_PREFIX else '') + line for line in nl_lines]
         encoder_ids = tokenizer(sources, max_length=MAX_SOURCE_LEN, truncation=True)['input_ids']
         encoder_ids = [torch.tensor(ids, dtype=torch.long) for ids in encoder_ids]
 
@@ -78,8 +165,7 @@ class T5Dataset(Dataset):
         sql_lines = load_lines(os.path.join(data_folder, f'{split}.sql'))
         assert len(sql_lines) == len(nl_lines)
         # Targets end with </s> (the tokenizer appends it), so the model learns when to stop
-        targets = tokenizer([encode_sql(q) for q in sql_lines], max_length=MAX_TARGET_LEN,
-                            truncation=True)['input_ids']
+        targets = encode_targets(sql_lines, tokenizer)
         targets = [torch.tensor(ids, dtype=torch.long) for ids in targets]
         return encoder_ids, targets
 

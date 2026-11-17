@@ -27,6 +27,10 @@ def initialize_model(args):
     else:
         # Same architecture, randomly initialised weights (extra credit)
         config = T5Config.from_pretrained(T5_CHECKPOINT)
+        # With the word-level SQL tokenizer the shared embedding / output layer gets one extra row
+        # per SQL word (32128 -> 32772); everything else is the unchanged t5-small architecture.
+        from load_data import target_vocab_size
+        config.vocab_size = target_vocab_size()
         model = T5ForConditionalGeneration(config)
 
     freeze = getattr(args, 'freeze', 'none')
@@ -40,6 +44,7 @@ def initialize_model(args):
     n_total = sum(p.numel() for p in model.parameters())
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model: {'pretrained ' + T5_CHECKPOINT if args.finetune else 'T5-small from scratch'} | "
+          f"vocab {model.config.vocab_size} | "
           f"freeze={freeze} | trainable params {n_train:,} / {n_total:,}")
     return model.to(DEVICE)
 

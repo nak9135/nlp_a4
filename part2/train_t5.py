@@ -9,7 +9,7 @@ import wandb
 
 from t5_utils import initialize_model, initialize_optimizer_and_scheduler, save_model, load_model_from_checkpoint, setup_wandb
 from transformers import GenerationConfig
-from load_data import load_t5_data, decode_sql
+from load_data import load_t5_data, decode_sql, configure as configure_data
 from utils import compute_metrics, save_queries_and_records, set_random_seeds
 
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
@@ -59,6 +59,17 @@ def get_args():
                         help="Tiny run (few batches) to check the code end to end")
     parser.add_argument('--seed', type=int, default=42)
 
+    # Extra credit (training from scratch)
+    parser.add_argument('--sql_tokenizer', type=str, default='t5', choices=['t5', 'word'],
+                        help="'word' gives every SQL word from train.sql its own new token (see load_data.py)")
+    parser.add_argument('--no_prefix', action='store_true',
+                        help="Drop the 'translate English to SQL: ' prefix (it only helps a pretrained model)")
+    parser.add_argument('--grad_clip', type=float, default=0.0,
+                        help="Clip the gradient norm to this value (0 = off). Needed when training from scratch.")
+    parser.add_argument('--eval_every', type=int, default=1,
+                        help="Run the slow generate-and-execute dev evaluation every N epochs (and at the "
+                             "last epoch). Patience is counted in evaluations.")
+
     args = parser.parse_args()
     return args
 
@@ -75,6 +86,10 @@ def train(args, model, train_loader, dev_loader, optimizer, scheduler):
     for epoch in range(args.max_n_epochs):
         tr_loss = train_epoch(args, model, train_loader, optimizer, scheduler)
         print(f"Epoch {epoch}: Average train loss was {tr_loss}")
+        last_epoch = epoch == args.max_n_epochs - 1
+        if (epoch + 1) % args.eval_every != 0 and not last_epoch:
+            save_model(checkpoint_dir, model, best=False)
+            continue
 
         eval_loss, record_f1, record_em, sql_em, error_rate = eval_epoch(args, model, dev_loader,
                                                                          gt_sql_path, model_sql_path,
@@ -130,6 +145,8 @@ def train_epoch(args, model, train_loader, optimizer, scheduler):
         non_pad = decoder_targets != PAD_IDX
         loss = criterion(logits[non_pad], decoder_targets[non_pad])
         loss.backward()
+        if args.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         optimizer.step()
         if scheduler is not None: 
             scheduler.step()
@@ -236,6 +253,7 @@ def test_inference(args, model, test_loader, model_sql_path, model_record_path):
 def main():
     # Get key arguments
     args = get_args()
+    configure_data(args.sql_tokenizer, use_prefix=not args.no_prefix)
     set_random_seeds(args.seed)
     print(vars(args))
     if args.use_wandb:

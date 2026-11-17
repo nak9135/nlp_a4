@@ -18,6 +18,10 @@ export A4_SCRATCH="${A4_SCRATCH:-/tmp/a4_cache}"
 part="$1"; shift
 stage="$1"
 
+# Two jobs may start at the same time (one per GPU): only one of them does the setup below.
+exec 9>/tmp/nlp_a4_setup.lock
+flock 9
+
 # 1. Writable working copy (once per session)
 if [ ! -d "$WORK" ]; then
     echo ">> Copying code to $WORK"
@@ -31,6 +35,7 @@ command -v uv >/dev/null 2>&1 || pip install -q uv
 if [ ! -x "$part/.venv/bin/python" ]; then
     bash hpc/setup_envs.sh "$part"
 fi
+flock -u 9
 
 # 3. Run the stage, logging to the kept output folder too
 mkdir -p "$KEEP/logs"
