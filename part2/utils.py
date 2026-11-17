@@ -4,6 +4,7 @@ import os
 import re
 import pickle
 import random
+import time
 from tqdm import tqdm
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -108,6 +109,7 @@ def compute_records(processed_qs: List[str]):
         for future in futures:
             if not future.done():
                 future.cancel()
+    pool.shutdown(wait=False)
             
     recs = []
     error_msgs = []
@@ -122,8 +124,16 @@ def compute_records(processed_qs: List[str]):
             
     return recs, error_msgs
 
+QUERY_TIMEOUT_SECS = 60  # per query; a bad generated join can otherwise run for hours
+
+
 def compute_record(query_id, query):
     conn = sqlite3.connect(DB_PATH)
+    # Abort runaway queries inside SQLite itself. The pool-level timeout below
+    # only stops *waiting*; without this the query keeps burning a CPU core
+    # in a background thread, and these pile up epoch after epoch.
+    deadline = time.monotonic() + QUERY_TIMEOUT_SECS
+    conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10000)
     cursor = conn.cursor()
 
     try:

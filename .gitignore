@@ -21,3 +21,9 @@ part2/wandb/
 # run logs
 logs/
 part2/debug/
+
+# LaTeX build files
+report/*.aux
+report/*.fls
+report/*.fdb_latexmk
+report/*.out

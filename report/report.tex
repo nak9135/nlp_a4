@@ -1,0 +1,346 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{float}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{enumitem}
+\setlist{itemsep=2pt, topsep=4pt}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{6pt}
+\newcolumntype{L}{>{\raggedright\arraybackslash}X}
+\newcommand{\code}[1]{\texttt{\small #1}}
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{[#1]}}}
+
+\title{DS-GA 1011 Assignment 4: Fine-tuning Language Models}
+\author{Natiq Khan (nak9135)}
+\date{Fall 2026}
+
+\begin{document}
+\maketitle
+
+\textbf{Code (GitHub):} \url{https://github.com/nak9135/nlp_a4}\\
+\textbf{T5 checkpoint (Google Drive):}\\ \url{https://drive.google.com/drive/folders/1j2nShBflPWAMhAdkVlnazR8XTUFrPFTk}
+
+All training was done on a Kaggle notebook with an NVIDIA T4 GPU.
+
+%==========================================================
+\section*{Part 1: BERT for Sentiment Classification}
+
+\subsection*{Q1. Fine-tuning BERT}
+
+I filled in the training loop in \code{do\_train}: for each batch, move it to the GPU, run the
+model (passing the labels so it returns the cross-entropy loss), call \code{backward()}, then step
+the optimizer and the learning-rate scheduler and zero the gradients. I kept all the default
+hyperparameters (3 epochs, batch size 8, learning rate $5\times10^{-5}$, linear decay).
+
+\begin{itemize}
+  \item Debug run (4,000 training examples, 1,000 test examples): \textbf{88.3\%} accuracy.
+  \item Full run (25,000 training examples, full test set): \textbf{92.81\%} accuracy.
+\end{itemize}
+
+\subsection*{Q2a. Transformation design: the ``careless reviewer''}
+
+The idea is to imitate a real person typing a quick review: they use slightly different words
+than usual and make a few typos. The transformation goes through the review one word at a time.
+
+\textbf{Step by step:}
+\begin{enumerate}
+  \item Split the review on IMDB's \code{<br />} line breaks and handle each piece separately
+        (so the line breaks are kept as they are).
+  \item Tokenize each piece into words with NLTK's \code{word\_tokenize}.
+  \item A word is \emph{eligible} for a change only if it is all letters, has at least 3 letters,
+        and is not in a small protected list. The protected list contains negations
+        (\emph{not, no, never, nothing, none, \dots}) and very common function words
+        (\emph{the, and, but, was, this, \dots}). Negations are protected because changing them
+        could flip the sentiment.
+  \item For every eligible word, draw a random number $r$ between 0 and 1:
+  \begin{itemize}
+    \item If $r < 0.25$: replace it with a \textbf{synonym}. The synonym is chosen at random from
+          the WordNet lemmas of the word's first two senses (synsets), keeping only single-word
+          lemmas that differ from the original word. If there is no such synonym, the word stays.
+    \item Else if $r < 0.45$ (another 20\%): add \textbf{one typo}. Pick one letter position at
+          random, never the first letter, and do one of four edits, chosen with equal chance:
+          (a) replace the letter with a neighbouring key on a QWERTY keyboard,
+          (b) swap it with the next letter,
+          (c) delete it, or
+          (d) type it twice.
+    \item Otherwise: leave the word unchanged.
+  \end{itemize}
+  \item Keep the original capitalization (\emph{Great} $\to$ \emph{Fine}), then join the words
+        back with NLTK's \code{TreebankWordDetokenizer} and remove the space it leaves before
+        punctuation.
+\end{enumerate}
+The random generator is seeded (\code{random.Random(0)}) so the transformed test set is the same
+every time.
+
+\textbf{Example} (output of my code):
+\begin{quote}\small
+\textit{Original:} This movie was absolutely wonderful. The acting was great and I loved the
+ending, but the middle dragged a little.\\
+\textit{Transformed:} This movie was absolutely wonderfu. The actig was graet and I lovrd the
+endkng, but the middle draggd a little.
+\end{quote}
+
+\textbf{Why this is reasonable.} Real online reviews are full of typos (people type fast, often on
+phones), and different people describe the same opinion with different words. A human reads the
+transformed review and still knows exactly what the reviewer thought, so the label does not
+change. At the same time it is not trivial for the model: BERT's WordPiece tokenizer splits a
+misspelled word like \emph{graet} into pieces it rarely saw during fine-tuning, so a strong
+sentiment word can lose its meaning for the model. Negations are never touched, so the
+transformation does not flip the sentiment on purpose.
+
+\subsection*{Q2b. Results}
+
+\begin{center}
+\begin{tabular}{lc}
+\toprule
+Test set & Accuracy \\
+\midrule
+Original & 92.81\% \\
+Transformed & 88.06\% \\
+\midrule
+Drop & \textbf{4.75 points} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%==========================================================
+\subsection*{Q3. Data augmentation}
+
+I took 5,000 random training reviews (\code{shuffle(seed=42)}), applied the same transformation to
+them, and added them to the full 25,000 original training reviews (30,000 total). I then trained a
+new BERT model from \code{bert-base-cased} on this data with the same hyperparameters as in Q1.
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Model & Original test & Transformed test \\
+\midrule
+Trained on original data (Q1/Q2) & 92.81\% & 88.06\% \\
+Trained on augmented data (Q3)   & 92.90\% & 90.12\% \\
+\midrule
+Change & +0.09 & \textbf{+2.06} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{(1) Did the transformed-test accuracy improve?} Yes. It went from 88.06\% to 90.12\%.
+Augmentation won back about 2 of the 4.75 points that were lost, but not all of them.
+
+\textbf{(2) What happened on the original test set?} Almost nothing: 92.81\% $\to$ 92.90\%. The
+0.09-point increase is small enough to be noise, so augmentation did not hurt clean accuracy.
+
+\textbf{Intuitive explanation.} The first model only ever saw clean text, so it learned to rely on
+exact words like \emph{great} or \emph{terrible}. When those words are misspelled or swapped, the
+signal it relies on disappears. With augmentation, the model sees misspelled and reworded reviews
+\emph{with their correct labels} during training, so it learns that \emph{graet} still means
+\emph{great} and pays attention to more of the review instead of a few key words. Clean accuracy
+stays the same because 25,000 of the 30,000 training reviews are still clean. The gain is only
+partial because only 1 in 6 training reviews is transformed, and every transformed test review
+has new random typos the model has never seen before.
+
+\textbf{One limitation.} This kind of augmentation only protects against the exact kind of change
+we put into the training data. Here the training noise and the test noise come from the same code,
+which is the best case. Real out-of-distribution data is different in ways we cannot predict in
+advance: other kinds of typos, slang, sarcasm, a different domain (e.g.\ product reviews instead
+of movies). The augmented model has no reason to do better on those. You would have to
+anticipate each type of shift and write a transformation for it.
+
+\textit{Note on training:} my first augmented run (seed 0) got stuck: its loss stayed at about 0.69
+(chance level) for the entire run and it predicted the same label for every review (50\% accuracy).
+This is a known way BERT fine-tuning can fail when it starts at the full learning rate with small
+batches. I reran it with a different random seed (\code{--seed 1}, which only changes the
+classifier-head initialization and batch order). That run trained normally and gave the numbers
+above.
+
+%==========================================================
+\section*{Part 2: T5 for Text-to-SQL}
+
+\subsection*{Q4. Data statistics}
+
+All lengths are counted in T5 tokens (\code{google-t5/t5-small} tokenizer). ``Vocabulary size'' is
+the number of different T5 tokens that appear in that split.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+Statistic & Train & Dev \\
+\midrule
+Number of examples & 4,225 & 466 \\
+Mean sentence length (tokens) & 17.10 & 17.07 \\
+Mean SQL query length (tokens) & 216.37 & 210.05 \\
+Vocabulary size (natural language) & 791 & 465 \\
+Vocabulary size (SQL) & 555 & 395 \\
+Max sentence length & 59 & 43 \\
+Max SQL query length & 510 & 502 \\
+\code{<unk>} tokens in SQL & 510 & 55 \\
+\bottomrule
+\end{tabular}
+\caption{Data statistics before any pre-processing (no special tokens added). The test set has 432
+examples. The \code{<unk>} tokens come from the \code{<} character, which is not in T5's vocabulary.}
+\end{table}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lcc}
+\toprule
+Statistic & Train & Dev \\
+\midrule
+\textbf{T5 fine-tuned (\code{t5-small})} & & \\
+Mean sentence length (tokens) & 23.10 & 23.07 \\
+Mean SQL query length (tokens) & 217.37 & 211.05 \\
+Vocabulary size (natural language) & 796 & 470 \\
+Vocabulary size (SQL) & 557 & 397 \\
+Max sentence length & 65 & 49 \\
+Max SQL query length & 511 & 503 \\
+\code{<unk>} tokens in SQL & 0 & 0 \\
+\bottomrule
+\end{tabular}
+\caption{Data statistics after pre-processing (task prefix added to the input, \code{<} replaced by
+a placeholder word in the SQL, and the end-of-sequence token \code{</s>} added to both).}
+\end{table}
+
+\subsection*{Q5. T5 fine-tuning details}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{>{\bfseries}p{3.5cm} L}
+\toprule
+Design choice & Description \\
+\midrule
+Data processing &
+The input sentence gets the prefix \code{"translate English to SQL: "} (the same style of prefix T5
+was pretrained with). In the SQL, every \code{<} is replaced with the word \code{lessthan} before
+tokenizing, because T5's vocabulary has no \code{<} character and it would become \code{<unk>}
+(so the model could never output it). After generating, \code{lessthan} is changed back to
+\code{<}. I checked that all 4,691 train and dev queries come back exactly the same after this
+round trip. No other cleaning. \\
+\addlinespace
+Tokenization &
+The default \code{T5TokenizerFast} from \code{google-t5/t5-small} for both the encoder and the
+decoder. Inputs are cut at 128 tokens and SQL at 512 tokens; no example is actually long enough
+to be cut. The tokenizer adds \code{</s>} to the end of every target so the model learns when to
+stop. Decoder input (teacher forcing) = the start token (T5's \code{decoder\_start\_token\_id},
+which is the pad id 0) followed by the target shifted right by one. Batches are padded with 0, and
+padded positions are ignored in the loss. When decoding, special tokens are skipped and
+\code{clean\_up\_tokenization\_spaces=False} so spacing in the SQL is not changed. \\
+\addlinespace
+Architecture &
+The full pretrained \code{google-t5/t5-small} model (\code{T5ForConditionalGeneration}). I
+fine-tuned \emph{all} parameters (60.5M): encoder, decoder, shared embeddings, and output head.
+Nothing was frozen. \\
+\addlinespace
+Hyperparameters &
+Optimizer AdamW, learning rate $5\times10^{-4}$, weight decay 0.01 (not applied to biases and
+LayerNorm weights), betas (0.9, 0.999), eps $10^{-8}$. Batch size 16. Cosine learning-rate
+schedule with 1 epoch of linear warm-up, planned over 20 epochs. Maximum 20 epochs. After every
+epoch, generate SQL for the whole dev set with greedy decoding (max 512 tokens), run it on the
+database, and keep the checkpoint with the best dev Record F1. Early stopping if Record F1 does not
+improve for 5 epochs (it did not trigger). Random seed 42. The best checkpoint was from the 17th
+epoch. Training took about 2 hours on one T4 GPU. \\
+\bottomrule
+\end{tabularx}
+\caption{Details of the best-performing T5 model configuration (fine-tuned).}
+\end{table}
+
+\subsection*{Q6. Results and error analysis}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccc}
+\toprule
+System & Query EM & Record EM & F1 score \\
+\midrule
+\textbf{Dev Results} & & & \\
+\textit{T5 fine-tuned} & & & \\
+\quad Full model (best epoch, 17 of 20) & 68.45 & 82.83 & 84.64 \\
+\quad Same model after 5 epochs & 47.21 & 64.16 & 70.22 \\
+\quad Same model after 10 epochs & 63.73 & 77.25 & 79.07 \\
+\quad First run, before the SQL-timeout fix$^{*}$ & 65.88 & 80.04 & 81.73 \\
+\midrule
+\textbf{Test Results} & & & \\
+\quad T5 fine-tuning & \todo{fill in} & -- & \todo{fill in} \\
+\bottomrule
+\end{tabular}
+\caption{Development and test results (in \%). The middle dev rows come from the per-epoch
+evaluation of the same training run. $^{*}$Same configuration, stopped early after 16 epochs
+(explained below).}
+\end{table}
+
+\textbf{About the rows.} I only had limited GPU time, so I trained one configuration and did not
+run separate ablations. The ``after 5/10 epochs'' rows show how much the extra epochs helped.
+The ``first run'' row used the same settings, but the evaluation code had a problem: SQL queries
+that hit the 120-second timeout were not actually stopped, so they kept running in the background
+and slowed down later evaluations. In epochs 14--15 many correct queries were then marked as
+timed out, which made Record F1 look like it dropped (to about 55) and triggered early stopping.
+I fixed this by making SQLite itself stop any query after 60 seconds. With the fix, the same
+configuration trained for all 20 epochs and reached 84.64 F1. The gap between Query EM (68.45) and
+Record EM (82.83) is because 67 of the 466 dev queries are written differently from the gold query
+but return exactly the same records.
+
+\textbf{Error analysis.} Of the 466 dev queries, 80 return different records from the gold query.
+I sorted them into the types below. For the two invalid-SQL rows I counted every query that
+fails to run (32 of 466), including 9 that still ``match'' because the gold query returns no rows
+either. The other rows count only queries that return wrong records.
+
+\begin{table}[H]
+\centering\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{2.3cm} >{\raggedright\arraybackslash}p{4.6cm} L >{\raggedright\arraybackslash}p{2.2cm}}
+\toprule
+\textbf{Error type} & \textbf{Example of error} & \textbf{Error description} & \textbf{Statistics} \\
+\midrule
+Wrong value (city, code, time, or date) &
+\textit{``us air flights departing from charlotte around 1pm''}\newline
+Gold: \code{departure\_time >= 1230 AND departure\_time <= 1330}\newline
+Predicted: \code{departure\_time >= 1330 AND departure\_time <= 1330} &
+The query has the right shape but one of the constants is wrong. Most often it is a time window
+(``around 1pm'', ``before 8''), a city or airport code (``what does iah mean'' $\to$ \code{'OAK'}),
+or a date (``today'' $\to$ a different month and day). The model has to turn vague phrases into
+exact numbers, and some codes appear only a few times in the training data. &
+45/466 queries (18 times, 22 names/codes, 5 dates or other numbers) \\
+\addlinespace
+Unbalanced parentheses &
+\textit{``show me the latest flight to love field''}\newline
+Predicted query is correct but ends with an extra \code{)} $\to$ \code{syntax error} &
+The gold queries use many nested \code{AND(\dots)} groups. The model loses count of how many
+groups are open and adds or forgets a closing parenthesis, so the query cannot run. Every syntax
+error in my dev predictions was caused by this. &
+13/466 queries fail to run \\
+\addlinespace
+Made-up table aliases / extra joins &
+\textit{``show me the ground transportation schedule in philadelphia in the morning on
+wednesday''}\newline
+Predicted uses \code{airport\_1.airport\_code} but \code{airport\_1} is never in the \code{FROM}
+list $\to$ \code{no such column} &
+The model copies join patterns it has seen many times (e.g.\ the city $\to$ airport\_service
+$\to$ airport chain) without declaring the tables in \code{FROM}, or declares the same alias
+twice (\code{ambiguous column name}). In a few cases it keeps repeating conditions and joins until
+the query is too slow to finish (stopped after 60 s). &
+19/466 queries (14 alias errors, 5 timeouts) \\
+\addlinespace
+Wrong columns or structure &
+\textit{``define airline us''}\newline
+Gold selects \code{airline\_code, airline\_name, note}\newline
+Predicted selects only \code{airline\_code} &
+The conditions are right but the query returns the wrong columns, uses \code{count(\dots)}
+instead of listing rows, or swaps the origin and destination (``reverse the flight from
+pittsburgh to denver''). These questions are phrased in unusual ways that the model rarely saw
+in training. &
+10/466 queries \\
+\addlinespace
+Noisy gold labels &
+\textit{``please list all flights from denver to philadelphia two saturdays from now''}\newline
+Gold: \code{SELECT state\_1.state\_code FROM state state\_1 WHERE state\_1.state\_code = 'ASD';} &
+A few gold queries are a placeholder that has nothing to do with the question. The model's
+answer is reasonable, but it is scored as wrong. This is a problem with the data, not the model. &
+5/466 gold queries (2 of them counted as wrong above) \\
+\bottomrule
+\end{tabularx}
+\caption{Error analysis on the dev set (fine-tuned T5, best checkpoint).}
+\end{table}
+
+\end{document}

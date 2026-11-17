@@ -179,6 +179,8 @@ if __name__ == "__main__":
     parser.add_argument("--learning_rate", type=float, default=5e-5)
     parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--seed", type=int, default=None,
+                        help="re-seed before training (default: keep the fixed seed 0 set at import)")
 
     args = parser.parse_args()
 
@@ -228,6 +230,10 @@ if __name__ == "__main__":
     # Train model on the augmented training dataset
     if args.train_augmented:
         train_dataloader = create_augmented_dataloader(args, dataset)
+        if args.seed is not None:
+            # Changes the classifier-head init and the batch order only
+            random.seed(args.seed); torch.manual_seed(args.seed); torch.cuda.manual_seed_all(args.seed)
+            print(f"Re-seeded with {args.seed}")
         model = AutoModelForSequenceClassification.from_pretrained("bert-base-cased", num_labels=2)
         model.to(device)
         do_train(args, model, train_dataloader, save_dir="./out_augmented")

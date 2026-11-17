@@ -16,6 +16,7 @@ source "$(dirname "$0")/env.sh"
 cd "$A4_ROOT/part1"
 PY=.venv/bin/python
 stage="${1:-}"
+shift || true   # anything after the stage name is passed on to main.py
 
 run() { echo; echo "===== $(date '+%F %T') :: python main.py $* ====="; $PY main.py "$@"; }
 
@@ -23,7 +24,7 @@ case "$stage" in
     debug)     run --train --eval --debug_train ;;
     full)      run --train --eval ;;
     transform) run --eval_transformed ;;
-    augment)   run --train_augmented --eval_transformed ;;
+    augment)   run --train_augmented --eval_transformed "$@" ;;
     augeval)   run --eval --model_dir out_augmented ;;
     all)
         run --train --eval
